@@ -2615,6 +2615,7 @@ struct llama_cparams {
     bool causal_attn;
     bool offload_kqv;
     bool flash_attn;
+    bool binary_kq;
     bool no_perf;
 
     enum llama_pooling_type pooling_type;
@@ -10525,6 +10526,7 @@ struct llm_build_context {
     const int32_t n_ctx_orig;
 
     const bool flash_attn;
+    const bool binary_kq;
 
     const enum llama_pooling_type pooling_type;
     const enum llama_rope_type    rope_type;
@@ -10574,6 +10576,7 @@ struct llm_build_context {
         kv_head          (worst_case ? (kv_self.recurrent ? 0 : kv_self.size - n_tokens) : kv_self.head),
         n_ctx_orig       (cparams.n_ctx_orig_yarn),
         flash_attn       (cparams.flash_attn),
+        binary_kq        (cparams.binary_kq),
         pooling_type     (cparams.pooling_type),
         rope_type        (hparams.rope_type),
         cb               (cb),
@@ -10760,25 +10763,41 @@ struct llm_build_context {
     }
 
     struct ggml_tensor * build_inp_KQ_mask(bool causal = true) {
-        lctx.inp_KQ_mask = causal
-            ? ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_kv,     GGML_PAD(n_tokens, GGML_KQ_MASK_PAD))
-            : ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
+        // lctx.inp_KQ_mask = causal
+            // ? ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_kv,     GGML_PAD(n_tokens, GGML_KQ_MASK_PAD))
+            // : ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
+        auto nx = causal ? n_kv : n_tokens;
+        // Note: we only use a binary mask when nx%32 == 0 because otherwise the CUDA implementation becomes way more messy
+        //bool can_be_binary = binary_kq && !lctx.is_encoding && !flash_attn && !hparams.use_alibi && nx%32 == 0;
+        //auto type = can_be_binary ? GGML_TYPE_I32 : flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
+        auto type = !lctx.is_encoding ? !binary_kq || flash_attn || hparams.use_alibi || (nx%32 != 0) ? GGML_TYPE_F16 : GGML_TYPE_I32 : GGML_TYPE_F32;
+        if (type == GGML_TYPE_I32) nx /= 32;
+        lctx.inp_KQ_mask = ggml_new_tensor_2d(ctx0, type, nx, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
         cb(lctx.inp_KQ_mask, "KQ_mask", -1);
         ggml_set_input(lctx.inp_KQ_mask);
 
-        return flash_attn ? ggml_cast(ctx0, lctx.inp_KQ_mask, GGML_TYPE_F16) : lctx.inp_KQ_mask;
+        // return flash_attn ? ggml_cast(ctx0, lctx.inp_KQ_mask, GGML_TYPE_F16) : lctx.inp_KQ_mask;
+        return lctx.inp_KQ_mask;
     }
 
     struct ggml_tensor * build_inp_KQ_mask_swa(bool causal = true) {
         GGML_ASSERT(hparams.n_swa > 0);
 
-        lctx.inp_KQ_mask_swa = causal
-            ? ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_kv,     GGML_PAD(n_tokens, GGML_KQ_MASK_PAD))
-            : ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
+        // lctx.inp_KQ_mask_swa = causal
+            // ? ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_kv,     GGML_PAD(n_tokens, GGML_KQ_MASK_PAD))
+            // : ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
+        auto nx = causal ? n_kv : n_tokens;
+        // Note: we only use a binary mask when nx%32 == 0 because otherwise the CUDA implementation becomes way more messy
+        //bool can_be_binary = binary_kq && !lctx.is_encoding && !flash_attn && !hparams.use_alibi && nx%32 == 0;
+        //auto type = can_be_binary ? GGML_TYPE_I32 : flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
+        auto type = !lctx.is_encoding ? !binary_kq || flash_attn || hparams.use_alibi || (nx%32 != 0) ? GGML_TYPE_F16 : GGML_TYPE_I32 : GGML_TYPE_F32;
+        if (type == GGML_TYPE_I32) nx /= 32;
+        lctx.inp_KQ_mask_swa = ggml_new_tensor_2d(ctx0, type, nx, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
         cb(lctx.inp_KQ_mask_swa, "KQ_mask_swa", -1);
         ggml_set_input(lctx.inp_KQ_mask_swa);
 
-        return flash_attn ? ggml_cast(ctx0, lctx.inp_KQ_mask_swa, GGML_TYPE_F16) : lctx.inp_KQ_mask_swa;
+        // return flash_attn ? ggml_cast(ctx0, lctx.inp_KQ_mask_swa, GGML_TYPE_F16) : lctx.inp_KQ_mask_swa;
+        return lctx.inp_KQ_mask_swa;
     }
 
     struct ggml_tensor * build_inp_mean() {
@@ -17248,43 +17267,74 @@ static void llama_set_inputs(llama_context & lctx, const llama_ubatch & ubatch) 
             const int64_t n_seqs       = ubatch.n_seqs;
 
 
-            float * data     = nullptr;
-            float * data_swa = nullptr;
+            // float * data     = nullptr;
+            // float * data_swa = nullptr;
+            if (lctx.inp_KQ_mask && lctx.inp_KQ_mask_swa) {
+                GGML_ASSERT(lctx.inp_KQ_mask->type == lctx.inp_KQ_mask_swa->type);
+            }
 
             if (lctx.inp_KQ_mask) {
                 GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_KQ_mask->buffer));
-                data = (float *) lctx.inp_KQ_mask->data;
+                // data = (float *) lctx.inp_KQ_mask->data;
             }
 
             if (lctx.inp_KQ_mask_swa) {
                 GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_KQ_mask_swa->buffer));
-                data_swa = (float *) lctx.inp_KQ_mask_swa->data;
+                // data_swa = (float *) lctx.inp_KQ_mask_swa->data;
             }
 
-            // For causal attention, use only the previous KV cells
+/*             // For causal attention, use only the previous KV cells
             // of the correct sequence for each token of the ubatch.
             // It's assumed that if a token in the batch has multiple sequences, they are equivalent.
-            for (int h = 0; h < 1; ++h) {
+            for (int h = 0; h < 1; ++h) { */
+            auto mask_type = lctx.inp_KQ_mask ? lctx.inp_KQ_mask->type : lctx.inp_KQ_mask_swa->type;
+            GGML_ASSERT(mask_type == GGML_TYPE_I32 || mask_type == GGML_TYPE_F32 || mask_type == GGML_TYPE_F16);
+
+            if (mask_type == GGML_TYPE_I32) {
+                // in order this to be true, we are not using alibi
+                GGML_ASSERT(!hparams.use_alibi);
+                uint32_t * h_data = lctx.inp_KQ_mask ? (uint32_t *)lctx.inp_KQ_mask->data : nullptr;
+                uint32_t * h_data_swa = lctx.inp_KQ_mask_swa ? (uint32_t *)lctx.inp_KQ_mask_swa->data : nullptr;
                 for (int s = 0; s < n_seqs; ++s) {
                     const llama_seq_id seq_id = ubatch.seq_id[s][0];
+
+                    uint32_t u = 0, u_swa = 0;
+                    uint32_t m = 1;
 
                     for (int j = 0; j < n_seq_tokens; ++j) {
                         const llama_pos pos = ubatch.pos[s*n_seq_tokens + j];
 
                         for (int i = 0; i < n_kv; ++i) {
-                            float f;
-                            if (!kv_self.cells[i].has_seq_id(seq_id) || kv_self.cells[i].pos > pos) {
-                                f = -INFINITY;
-                            } else {
-                                if (hparams.use_alibi) {
-                                    f = -std::abs(kv_self.cells[i].pos - pos);
-                                } else {
-                                    f = 0.0f;
-                                }
+                            // float f;
+                            // if (!kv_self.cells[i].has_seq_id(seq_id) || kv_self.cells[i].pos > pos) {
+                                // f = -INFINITY;
+                            // } else {
+                                // if (hparams.use_alibi) {
+                                    // f = -std::abs(kv_self.cells[i].pos - pos);
+                                // } else {
+                                    // f = 0.0f;
+                                // }
+                            if (lctx.kv_self.cells[i].pos > pos || !lctx.kv_self.cells[i].has_seq_id(seq_id)) {
+                                u |= m; u_swa |= m;
                             }
+                            if (pos - lctx.kv_self.cells[i].pos >= (int32_t)hparams.n_swa) u_swa |= m;
+                            m <<= 1;
+                            if (!m) {
+                                if (h_data) *h_data++ = ~u;
+                                if (h_data_swa) *h_data_swa++ = ~u_swa;
+                                u = u_swa = 0; m = 1;
+                            }
+                        }
+                        if (m > 1) {
+                            if (h_data) *h_data++ = ~u;
+                            if (h_data_swa) *h_data_swa++ = ~u_swa;
+                        }
+                            // if (data) {
+                                // data[h*(n_kv*n_tokens) + s*(n_kv*n_seq_tokens) + j*n_kv + i] = f;
+                    }
 
-                            if (data) {
-                                data[h*(n_kv*n_tokens) + s*(n_kv*n_seq_tokens) + j*n_kv + i] = f;
+                    auto n_pad = GGML_PAD(n_tokens, GGML_KQ_MASK_PAD);
+                    if (n_pad > n_tokens) {
                             }
 
                             // may need to cut off old tokens for sliding window

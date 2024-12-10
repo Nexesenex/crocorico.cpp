@@ -357,6 +357,7 @@ extern "C" {
         bool embeddings;  // if true, extract embeddings (together with logits)
         bool offload_kqv; // whether to offload the KQV ops (including the KV cache) to GPU
         bool flash_attn;  // whether to use flash attention [EXPERIMENTAL]
+        bool binary_kq;   // whether to use binary KQ mask [EXPERIMENTAL]
         bool no_perf;     // whether to measure performance timings
 
         // Abort callback
