@@ -40,6 +40,7 @@ bool g_mul_mat_q = false;
 #include "ggml-cuda/unary.cuh"
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv6.cuh"
+#include "ggml-cuda/softcap.cuh"
 
 #include <algorithm>
 #include <array>
@@ -2312,6 +2313,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_SCALE:
             ggml_cuda_op_scale(ctx, dst);
             break;
+        case GGML_OP_SOFTCAP:
+            ggml_cuda_op_softcap(ctx, dst);
+            break;
         case GGML_OP_SQR:
             ggml_cuda_op_sqr(ctx, dst);
             break;
@@ -3204,6 +3208,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_MUL:
         case GGML_OP_DIV:
         case GGML_OP_SCALE:
+        case GGML_OP_SOFTCAP:
         case GGML_OP_SQR:
         case GGML_OP_SQRT:
         case GGML_OP_SIN:
