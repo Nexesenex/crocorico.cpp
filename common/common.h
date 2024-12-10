@@ -267,7 +267,6 @@ struct common_params {
     bool simple_io         = false; // improves compatibility with subprocesses and limited consoles
     bool cont_batching     = true;  // insert new sequences for decoding on-the-fly
     bool flash_attn        = false; // flash attention
-    bool binary_kq         = true; // use binary KQ mask (if allowed in the given context)
     bool no_perf           = false; // disable performance metrics
     bool ctx_shift         = true;  // context shift on inifinite text generation
 
