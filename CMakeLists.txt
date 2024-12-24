@@ -64,7 +64,7 @@ option(LLAMA_HIPBLAS                         "llama: use hipBLAS"               
 option(LLAMA_OPENMP                          "llama: use OpenMP"                                OFF)
 
 
-option(LLAMA_IQK_MULMAT                      "llama: use optimized iqk matrix multiplications"  ON)
+option(GGML_USE_IQK_MULMAT                   "llama: use optimized iqk matrix multiplications"  ON)
 
 # Croco.Cpp Specifics
 option(LLAMA_CUDA_FA_ALL_QUANTS              "llama: compile 18 quants for FlashAttention"      OFF)
@@ -103,12 +103,14 @@ set(GGML_V3_CUDA_SOURCES otherarch/ggml_v3-cuda.cu otherarch/ggml_v3-cuda.h)
 set(GGML_V2_CUDA_SOURCES otherarch/ggml_v2-cuda.cu otherarch/ggml_v2-cuda.h)
 set(GGML_V2_LEGACY_CUDA_SOURCES otherarch/ggml_v2-cuda-legacy.cu otherarch/ggml_v2-cuda-legacy.h)
 
-set (GGML_SOURCES_IQK iqk-quantize.cpp)
-if (LLAMA_IQK_MULMAT)
-    add_compile_definitions(GGML_USE_IQK_MULMAT)
-    set(GGML_SOURCES_IQK_MM iqk_mul_mat.cpp)
-    set(GGML_HEADERS_IQK_MM iqk_mul_mat.h)
-endif()
+# set (GGML_SOURCES_IQK iqk-quantize.cpp)
+# if (GGML_USE_IQK_MULMAT)
+    # add_compile_definitions(GGML_USE_IQK_MULMAT)
+    # set(GGML_SOURCES_IQK_MM iqk_mul_mat.cpp)
+    # set(GGML_HEADERS_IQK_MM iqk_mul_mat.h)
+# endif()
+
+add_compile_definitions(GGML_USE_IQK_MULMAT)
 
 if (GGML_CUDA_USE_GRAPHS)
     add_compile_definitions(GGML_CUDA_USE_GRAPHS)
