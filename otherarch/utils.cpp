@@ -345,6 +345,29 @@ std::string get_timestamp_str()
     return timestamp;
 }
 
+std::vector<float> resample_wav(const std::vector<float>& input, uint32_t input_rate, uint32_t output_rate) {
+
+    size_t input_size = input.size();
+
+    double ratio = static_cast<double>(output_rate) / input_rate;
+    size_t newLength = static_cast<size_t>(input.size() * ratio);
+    std::vector<float> output(newLength);
+
+    // Perform simple linear interpolation resampling
+    for (size_t i = 0; i < newLength; ++i) {
+        double srcIndex = i / ratio;
+        size_t srcIndexInt = static_cast<size_t>(srcIndex);
+        double frac = srcIndex - srcIndexInt;
+        if (srcIndexInt + 1 < input_size) {
+            output[i] = static_cast<float>(input[srcIndexInt] * (1 - frac) + input[srcIndexInt + 1] * frac);
+        } else {
+            output[i] = input[srcIndexInt];
+        }
+    }
+
+    return output;
+}
+
 //a very rudimentary all in one sampling function which has no dependencies
 int32_t kcpp_quick_sample(float * logits, const int n_logits, int top_k, float temp, std::mt19937 & rng)
 {

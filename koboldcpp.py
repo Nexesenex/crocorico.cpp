@@ -412,7 +412,7 @@ def init_library():
             libname = lib_clblast_noavx2
         elif (args.usevulkan is not None) and file_exists(lib_vulkan_noavx2):
             libname = lib_vulkan_noavx2
-        elif ((args.usecpu and args.nommap) or args.failsafe) and file_exists(lib_failsafe):
+        elif (args.failsafe) and file_exists(lib_failsafe):
             print("!!! Attempting to use FAILSAFE MODE !!!")
             libname = lib_failsafe
         elif file_exists(lib_noavx2):
@@ -722,6 +722,17 @@ def string_contains_or_overlaps_sequence_substring(inputstr, sequences):
         if string_has_overlap(inputstr, s, 10):
             return True
     return False
+
+def get_capabilities():
+    global has_multiplayer, KcppVersion, friendlymodelname, friendlysdmodelname, fullsdmodelpath, mmprojpath, password, fullwhispermodelpath, ttsmodelpath
+    has_llm = not (friendlymodelname=="inactive")
+    has_txt2img = not (friendlysdmodelname=="inactive" or fullsdmodelpath=="")
+    has_vision = (mmprojpath!="")
+    has_password = (password!="")
+    has_whisper = (fullwhispermodelpath!="")
+    has_search = True if args.websearch else False
+    has_tts = (ttsmodelpath!="")
+    return {"result":"KoboldCpp", "version":KcppVersion, "protected":has_password, "llm":has_llm, "txt2img":has_txt2img,"vision":has_vision,"transcribe":has_whisper,"multiplayer":has_multiplayer,"websearch":has_search,"tts":has_tts}
 
 def read_gguf_metadata(file_path):
     chunk_size = 8192  # read only first 8kb of file
@@ -1472,7 +1483,7 @@ def load_model(model_filename):
     inputs.use_rowsplit = (True if (args.usecublas and "rowsplit" in args.usecublas) else False)
     inputs.vulkan_info = "0".encode("UTF-8")
     inputs.blasthreads = args.blasthreads
-    inputs.use_mmap = (not args.nommap)
+    inputs.use_mmap = args.usemmap
     inputs.use_mlock = args.usemlock
     inputs.lora_filename = "".encode("UTF-8")
     inputs.lora_base = "".encode("UTF-8")
@@ -1931,8 +1942,10 @@ def tts_generate(genparams):
     prompt = prompt.strip()
     voice = 1
     voicestr = genparams.get("voice", genparams.get("speaker_wav", ""))
-    if voicestr and voicestr.strip().lower()=="kobo":
-        voice = 1
+    voice_mapping = ["kobo","cheery","sleepy","tutor","shouty","bored","record"]
+    normalized_voice = voicestr.strip().lower() if voicestr else ""
+    if normalized_voice in voice_mapping:
+        voice = voice_mapping.index(normalized_voice) + 1
     else:
         voice = simple_lcg_hash(voicestr.strip()) if voicestr else 1
     inputs = tts_generation_inputs()
@@ -2427,17 +2440,18 @@ ws ::= | " " | "\n" [ \t]{0,20}
 
 def LaunchWebbrowser(target_url, failedmsg):
     try:
-        import webbrowser as wb
-        if wb.open(target_url, autoraise=True):
-            return
-        raise RuntimeError("Cannot open default browser")
-    except Exception as e:
+        if os.name == "posix" and "DISPLAY" in os.environ:  # UNIX-like systems
+            import subprocess
+            result = subprocess.run(["xdg-open", target_url], check=True)
+            if result.returncode == 0:
+                return  # fallback successful
+        raise RuntimeError("no xdg-open")
+    except Exception:
         try:
-            print(f"Browser failed to launch: {e}, attempting to use xdg-open...")
             import webbrowser as wb
-            if wb.get('xdg-open').open(target_url, autoraise=True):
-                return
-            raise RuntimeError("Cannot open xdg-open browser")
+            if wb.open(target_url, autoraise=True):
+                return  # If successful, exit the function
+            raise RuntimeError("wb.open failed")
         except Exception:
             print(failedmsg)
             print(f"Please manually open your browser to {target_url}")
@@ -2794,7 +2808,7 @@ Enter Prompt:<br>
 
     def do_GET(self):
         global embedded_kailite, embedded_kcpp_docs, embedded_kcpp_sdui
-        global has_multiplayer, multiplayer_turn_major, multiplayer_turn_minor, multiplayer_story_data_compressed, multiplayer_dataformat, multiplayer_lastactive, maxctx, maxhordelen, friendlymodelname, lastgeneratedcomfyimg, KcppVersion, totalgens, preloaded_story, exitcounter, currentusergenkey, friendlysdmodelname, fullsdmodelpath, mmprojpath, password, fullwhispermodelpath, ttsmodelpath
+        global has_multiplayer, multiplayer_turn_major, multiplayer_turn_minor, multiplayer_story_data_compressed, multiplayer_dataformat, multiplayer_lastactive, maxctx, maxhordelen, friendlymodelname, lastgeneratedcomfyimg, KcppVersion, totalgens, preloaded_story, exitcounter, currentusergenkey, friendlysdmodelname, fullsdmodelpath, mmprojpath, password
         self.path = self.path.rstrip('/')
         response_body = None
         content_type = 'application/json'
@@ -2847,13 +2861,17 @@ Enter Prompt:<br>
             response_body = (json.dumps({"value": maxctx}).encode())
 
         elif self.path.endswith(('/api/extra/version')):
-            has_txt2img = not (friendlysdmodelname=="inactive" or fullsdmodelpath=="")
-            has_vision = (mmprojpath!="")
-            has_password = (password!="")
-            has_whisper = (fullwhispermodelpath!="")
-            has_search = True if args.websearch else False
-            has_tts = (ttsmodelpath!="")
-            response_body = (json.dumps({"result":"KoboldCpp/Croco.Cpp","version":KcppVersion, "protected":has_password ,"txt2img":has_txt2img,"vision":has_vision,"transcribe":has_whisper,"multiplayer":has_multiplayer,"websearch":has_search,"tts":has_tts}).encode())
+
+            # has_txt2img = not (friendlysdmodelname=="inactive" or fullsdmodelpath=="")
+            # has_vision = (mmprojpath!="")
+            # has_password = (password!="")
+            # has_whisper = (fullwhispermodelpath!="")
+            # has_search = True if args.websearch else False
+            # has_tts = (ttsmodelpath!="")
+            # response_body = (json.dumps({"result":"KoboldCpp/Croco.Cpp","version":KcppVersion, "protected":has_password ,"txt2img":has_txt2img,"vision":has_vision,"transcribe":has_whisper,"multiplayer":has_multiplayer,"websearch":has_search,"tts":has_tts}).encode())
+
+            caps = get_capabilities()
+            response_body = (json.dumps(caps).encode())
 
         elif self.path.endswith(('/api/extra/perf')):
             global last_req_time, start_time
@@ -2908,7 +2926,7 @@ Enter Prompt:<br>
            response_body = (json.dumps([]).encode())
 
         elif self.path.endswith(('/speakers_list')): #xtts compatible
-            response_body = (json.dumps(["kobo","bean","corn","spicy","lime","fire","metal","potato"]).encode()) #some random voices for them to enjoy
+            response_body = (json.dumps(["kobo","cheery","sleepy","tutor","shouty","bored","record"]).encode()) #some random voices for them to enjoy
 
         elif self.path.endswith(('/api/tags')): #ollama compatible
             response_body = (json.dumps({"models":[{"name":"koboldcpp","model":friendlymodelname,"modified_at":"2024-07-19T15:26:55.6122841+08:00","size":394998579,"digest":"b5dc5e784f2a3ee1582373093acf69a2f4e2ac1710b253a001712b86a61f88bb","details":{"parent_model":"","format":"gguf","family":"koboldcpp","families":["koboldcpp"],"parameter_size":"128M","quantization_level":"Q4_0"}}]}).encode())
@@ -3686,7 +3704,7 @@ def show_gui():
 
     launchbrowser = ctk.IntVar(value=1)
     highpriority = ctk.IntVar()
-    disablemmap = ctk.IntVar()
+    usemmap = ctk.IntVar(value=0)
     usemlock = ctk.IntVar()
     debugmode = ctk.IntVar()
     keepforeground = ctk.IntVar()
@@ -4105,7 +4123,7 @@ def show_gui():
     # quick boxes
     quick_boxes = {
         "Launch Browser": [launchbrowser, "Launches your default browser after model loading is complete"],
-        "Disable MMAP": [disablemmap,  "Avoids using mmap to load models if enabled"],
+        "Use MMAP": [usemmap,  "Use mmap to load models if enabled, model will not be unloadable"],
         "Use ContextShift": [contextshift, "Uses Context Shifting to reduce reprocessing.\nRecommended. Check the wiki for more info."],
         "Remote Tunnel": [remotetunnel,  "Creates a trycloudflare tunnel.\nAllows you to access KoboldCpp/Croco.Cpp from other devices over an internet URL."],
         "Quiet Mode": [quietmode, "Prevents all generation related terminal output from being displayed."]
@@ -4163,7 +4181,7 @@ def show_gui():
     hardware_boxes = {
         "Launch Browser": [launchbrowser, "Launches your default browser after model loading is complete"],
         "High Priority": [highpriority, "Increases the KoboldCpp/Croco.Cpp process priority.\nMay cause lag or slowdown instead. Not recommended."],
-        "Disable MMAP": [disablemmap, "Avoids using mmap to load models if enabled"],
+        "Use MMAP": [usemmap, "Use mmap to load models if enabled, model will not be unloadable"],
         "Use mlock": [usemlock, "Enables mlock, preventing the RAM used to load the model from being paged out."],
         "Debug Mode": [debugmode, "Enables debug mode, with extra info printed to the terminal."],
         "Keep Foreground": [keepforeground, "Bring KoboldCpp/Croco.Cpp to the foreground every time there is a new generation."]
@@ -4389,7 +4407,7 @@ def show_gui():
         savdict["hordeworkername"] = ""
         savdict["sdthreads"] = 0
         savdict["password"] = None
-        savdict["nommap"] = False
+        savdict["usemmap"] = False
         savdict["usemlock"] = False
         savdict["debugmode"] = 0
         savdict["ssl"] = None
@@ -4447,7 +4465,7 @@ def show_gui():
         args.debugmode  = debugmode.get()
         args.launch     = launchbrowser.get()==1
         args.highpriority = highpriority.get()==1
-        args.nommap = disablemmap.get()==1
+        args.usemmap = usemmap.get()==1
         args.smartcontext = smartcontext.get()==1
         args.flashattention = flashattention.get()==1
         args.contextshift = contextshift.get()==1
@@ -4510,7 +4528,7 @@ def show_gui():
         if runopts_var.get()=="Failsafe Mode (Older CPU)":
             args.noavx2 = True
             args.usecpu = True
-            args.nommap = True
+            args.usemmap = False
             args.failsafe = True
         if tensor_split_str_vars.get()!="":
             tssv = tensor_split_str_vars.get()
@@ -4628,7 +4646,7 @@ def show_gui():
             debugmode.set(dict["debugmode"])
         launchbrowser.set(1 if "launch" in dict and dict["launch"] else 0)
         highpriority.set(1 if "highpriority" in dict and dict["highpriority"] else 0)
-        disablemmap.set(1 if "nommap" in dict and dict["nommap"] else 0)
+        usemmap.set(1 if "usemmap" in dict and dict["usemmap"] else 0)
         smartcontext.set(1 if "smartcontext" in dict and dict["smartcontext"] else 0)
         flashattention.set(1 if "flashattention" in dict and dict["flashattention"] else 0)
         contextshift.set(1 if "contextshift" in dict and dict["contextshift"] else 0)
@@ -5919,6 +5937,35 @@ def main(launch_args,start_server=True):
     except Exception:
         print("Could not find Embedded SDUI.")
 
+    # print enabled modules
+    caps = get_capabilities()
+    enabledmlist = []
+    disabledmlist = []
+    apimlist = ["KoboldCppApi"]
+    if "llm" in caps and caps["llm"]:
+        apimlist.append("OpenAiApi")
+        apimlist.append("OllamaApi")
+    if "txt2img" in caps and caps["txt2img"]:
+        apimlist.append("A1111ForgeApi")
+        apimlist.append("ComfyUiApi")
+    if "transcribe" in caps and caps["transcribe"]:
+        apimlist.append("WhisperTranscribeApi")
+    if "tts" in caps and caps["tts"]:
+        apimlist.append("XttsApi")
+        apimlist.append("OpenAiSpeechApi")
+    enabledmlist.append("TextGeneration") if "llm" in caps and caps["llm"] else disabledmlist.append("TextGeneration")
+    enabledmlist.append("ImageGeneration") if "txt2img" in caps and caps["txt2img"] else disabledmlist.append("ImageGeneration")
+    enabledmlist.append("VoiceRecognition") if "transcribe" in caps and caps["transcribe"] else disabledmlist.append("VoiceRecognition")
+    enabledmlist.append("MultimodalVision") if "vision" in caps and caps["vision"] else disabledmlist.append("MultimodalVision")
+    enabledmlist.append("NetworkMultiplayer") if "multiplayer" in caps and caps["multiplayer"] else disabledmlist.append("NetworkMultiplayer")
+    enabledmlist.append("ApiKeyPassword") if "protected" in caps and caps["protected"] else disabledmlist.append("ApiKeyPassword")
+    enabledmlist.append("WebSearchProxy") if "websearch" in caps and caps["websearch"] else disabledmlist.append("WebSearchProxy")
+    enabledmlist.append("TextToSpeech") if "tts" in caps and caps["tts"] else disabledmlist.append("TextToSpeech")
+
+    print(f"======\nActive Modules: {' '.join(enabledmlist)}")
+    print(f"Inactive Modules: {' '.join(disabledmlist)}")
+    print(f"Enabled APIs: {' '.join(apimlist)}")
+
     if args.port_param!=defaultport:
         args.port = args.port_param
 
@@ -6223,7 +6270,8 @@ if __name__ == '__main__':
 
     # advparser.add_argument("--noshift", help="If set, do not attempt to Trim and Shift the GGUF context.", action='store_true')
     advparser.add_argument("--nofastforward", help="If set, do not attempt to fast forward GGUF context (always reprocess). Will also enable noshift", action='store_true')
-    advparser.add_argument("--nommap", help="If set, do not use mmap to load newer models", action='store_true')
+    compatgroup3 = advparser.add_mutually_exclusive_group()
+    compatgroup3.add_argument("--usemmap", help="If set, uses mmap to load model. This model will not be unloadable.", action='store_true')
     advparser.add_argument("--usemlock", help="Enables mlock, preventing the RAM used to load the model from being paged out. Not usually recommended.", action='store_true')
     advparser.add_argument("--noavx2", help="Do not use AVX2 instructions, a slower compatibility mode for older devices.", action='store_true')
     advparser.add_argument("--failsafe", help="Use failsafe mode, extremely slow CPU only compatibility mode that should work on all devices.", action='store_true')
@@ -6300,5 +6348,6 @@ if __name__ == '__main__':
     deprecatedgroup.add_argument("--hordeconfig", help=argparse.SUPPRESS, nargs='+')
     deprecatedgroup.add_argument("--sdconfig", help=argparse.SUPPRESS, nargs='+')
     compatgroup.add_argument("--noblas", help=argparse.SUPPRESS, action='store_true')
+    compatgroup3.add_argument("--nommap", help=argparse.SUPPRESS, action='store_true')
 
     main(parser.parse_args(),start_server=True)
