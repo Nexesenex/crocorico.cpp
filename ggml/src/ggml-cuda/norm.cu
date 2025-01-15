@@ -102,19 +102,23 @@ static __global__ void rms_norm_f32(const float * x, float * dst, const int ncol
     const int row = blockIdx.x*blockDim.y + threadIdx.y;
     const int tid = threadIdx.x;
 
+    x   += row*ncols;
+    dst += row*ncols;
+
     float tmp = 0.0f; // partial sum for thread in warp
 
     for (int col = tid; col < ncols; col += block_size) {
-        const float xi = x[row*ncols + col];
+        const float xi = x[col];
         tmp += xi * xi;
     }
 
     // sum up partial sums
     tmp = warp_reduce_sum(tmp);
-    if (block_size > WARP_SIZE) {
+    if constexpr (block_size > WARP_SIZE) {
+        static_assert(block_size == 1024, "unexpected block_size");
         __shared__ float s_sum[32];
-        int warp_id = threadIdx.x / WARP_SIZE;
-        int lane_id = threadIdx.x % WARP_SIZE;
+        const int warp_id = threadIdx.x / WARP_SIZE;
+        const int lane_id = threadIdx.x % WARP_SIZE;
         if (lane_id == 0) {
             s_sum[warp_id] = tmp;
         }
@@ -127,7 +131,58 @@ static __global__ void rms_norm_f32(const float * x, float * dst, const int ncol
     const float scale = rsqrtf(mean + eps);
 
     for (int col = tid; col < ncols; col += block_size) {
-        dst[row*ncols + col] = scale * x[row*ncols + col];
+        dst[col] = scale * x[col];
+    }
+}
+
+template <int block_size>
+static __global__ void rms_norm_back_f32(const float * x, const float * grad, float * dst, const int ncols, const float eps) {
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
+    const int tid = threadIdx.x;
+
+    x    += row*ncols;
+    grad += row*ncols;
+    dst  += row*ncols;
+
+    float sum_xx = 0.0f; // sum for squares of x, equivalent to forward pass
+    float sum_xg = 0.0f; // sum for x * gradient, needed because RMS norm mixes inputs
+
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = x[col];
+        sum_xx += xi * xi;
+        sum_xg += xi * grad[col];
+    }
+
+    // sum up partial sums
+    sum_xx = warp_reduce_sum(sum_xx);
+    sum_xg = warp_reduce_sum(sum_xg);
+    if constexpr (block_size > WARP_SIZE) {
+        static_assert(block_size == 1024, "unexpected block_size");
+        __shared__ float s_sum_xx[32];
+        __shared__ float s_sum_xg[32];
+        const int warp_id = threadIdx.x / WARP_SIZE;
+        const int lane_id = threadIdx.x % WARP_SIZE;
+        if (lane_id == 0) {
+            s_sum_xx[warp_id] = sum_xx;
+            s_sum_xg[warp_id] = sum_xg;
+        }
+        __syncthreads();
+
+        sum_xx = s_sum_xx[lane_id];
+        sum_xx = warp_reduce_sum(sum_xx);
+
+        sum_xg = s_sum_xg[lane_id];
+        sum_xg = warp_reduce_sum(sum_xg);
+    }
+
+    const float mean_eps = sum_xx / ncols + eps;
+    const float sum_eps  = sum_xx + ncols*eps;
+
+    const float scale_grad = rsqrtf(mean_eps);
+    const float scale_x    = -scale_grad * sum_xg/sum_eps;
+
+    for (int col = tid; col < ncols; col += block_size) {
+        dst[col] = scale_grad*grad[col] + scale_x*x[col];
     }
 }
 
@@ -160,6 +215,17 @@ static void rms_norm_f32_cuda(const float * x, float * dst, const int ncols, con
     } else {
         const dim3 block_dims(1024, 1, 1);
         rms_norm_f32<1024><<<nrows, block_dims, 0, stream>>>(x, dst, ncols, eps);
+    }
+}
+
+static void rms_norm_back_f32_cuda(const float * x, const float * grad, float * dst, const int ncols, const int nrows, const float eps, cudaStream_t stream) {
+    GGML_ASSERT(ncols % WARP_SIZE == 0);
+    if (ncols < 1024) {
+        const dim3 block_dims(WARP_SIZE, 1, 1);
+        rms_norm_back_f32<WARP_SIZE><<<nrows, block_dims, 0, stream>>>(x, grad, dst, ncols, eps);
+    } else {
+        const dim3 block_dims(1024, 1, 1);
+        rms_norm_back_f32<1024><<<nrows, block_dims, 0, stream>>>(x, grad, dst, ncols, eps);
     }
 }
 
@@ -221,4 +287,28 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     memcpy(&eps, dst->op_params, sizeof(float));
 
     rms_norm_f32_cuda(src0_d, dst_d, ne00, nrows, eps, stream);
+}
+
+void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0]; // values from forward pass
+    const ggml_tensor * src1 = dst->src[1]; // gradients
+
+    const float * src0_d = (const float *) src0->data;
+    const float * src1_d = (const float *) src1->data;
+    float       * dst_d  = (float       *) dst->data;
+
+    cudaStream_t stream = ctx.stream();
+
+    GGML_ASSERT(ggml_is_contiguous(src0));
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+
+    const int64_t ne00 = src0->ne[0];
+    const int64_t nrows = ggml_nrows(src0);
+
+    float eps;
+    memcpy(&eps, dst->op_params, sizeof(float));
+
+    rms_norm_back_f32_cuda(src0_d, src1_d, dst_d, ne00, nrows, eps, stream);
 }

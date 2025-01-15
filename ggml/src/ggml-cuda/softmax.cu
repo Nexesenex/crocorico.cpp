@@ -1,5 +1,7 @@
 #include "common.cuh"
+#include "ggml.h"
 #include "softmax.cuh"
+#include <cstdint>
 
 template <typename T>
 static __device__ __forceinline__ float t2f32(T val) {
@@ -12,7 +14,9 @@ __device__ float __forceinline__ t2f32<half>(half val) {
 }
 
 template <bool vals_smem, int ncols_template, int block_size_template, typename T>
-static __global__ void soft_max_f32(const float * x, const T * mask, float * dst, const int ncols_par, const int nrows_y, const float scale, const float max_bias, const float m0, const float m1, uint32_t n_head_log2) {
+static __global__ void soft_max_f32(
+        const float * x, const T * mask, float * dst, const int ncols_par, const int nrows_y,
+        const float scale, const float max_bias, const float m0, const float m1, uint32_t n_head_log2) {
     const int ncols = ncols_template == 0 ? ncols_par : ncols_template;
 
     const int tid  = threadIdx.x;
@@ -115,6 +119,28 @@ static __global__ void soft_max_f32(const float * x, const T * mask, float * dst
     }
 }
 
+static __global__ void soft_max_back_f32(
+        const float * x, const float * grad, float * dst, const int ncols, const float scale) {
+    const int tid  = threadIdx.x;
+    const int rowx = blockIdx.x;
+
+    float xgdot = 0.0f;
+
+    for (int col = tid; col < ncols; col += WARP_SIZE) {
+        const int64_t ix = (int64_t)rowx*ncols + col;
+
+        xgdot += x[ix]*grad[ix];
+    }
+
+    xgdot = warp_reduce_sum(xgdot);
+
+    for (int col = tid; col < ncols; col += WARP_SIZE) {
+        const int64_t ix = (int64_t)rowx*ncols + col;
+
+        dst[ix] = scale * (grad[ix] - xgdot) * x[ix];
+    }
+}
+
 template<typename T>
 static void soft_max_f32_cuda(const float * x, const T * mask, float * dst, const int ncols_x, const int nrows_x, const int nrows_y, const float scale, const float max_bias, cudaStream_t stream) {
     int nth = WARP_SIZE;
@@ -167,14 +193,23 @@ static void soft_max_f32_cuda(const float * x, const T * mask, float * dst, cons
     }
 }
 
+static void soft_max_back_f32_cuda(
+        const float * x, const float * grad, float * dst,
+        const int ncols, const int nrows, const float scale, cudaStream_t stream) {
+    const dim3 block_dims(WARP_SIZE, 1, 1);
+    const dim3 block_nums(nrows,     1, 1);
+
+    soft_max_back_f32<<<block_nums, block_dims, 0, stream>>>(x, grad, dst, ncols, scale);
+}
+
 void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    const float * src0_d = (const float *)src0->data;
-    const void  * src1_d = src1 ? (const void *)src1->data : nullptr;
+    const float * src0_d = (const float *) src0->data;
+    const void  * src1_d = src1 ? (const void *) src1->data : nullptr;
 
-    float * dst_d = (float *)dst->data;
+    float * dst_d = (float *) dst->data;
     cudaStream_t stream = ctx.stream();
 
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
@@ -189,18 +224,46 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     float scale    = 1.0f;
     float max_bias = 0.0f;
 
-    memcpy(&scale,    (float *) dst->op_params + 0, sizeof(float));
-    memcpy(&max_bias, (float *) dst->op_params + 1, sizeof(float));
+    memcpy(&scale,    (const float *) dst->op_params + 0, sizeof(float));
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
 
     const bool use_f16 = (src1 && src1->type == GGML_TYPE_F16);
 
     if (use_f16) {
-        const half * src1_dd = (const half *)src1_d;
+        const half * src1_dd = (const half *) src1_d;
 
         soft_max_f32_cuda(src0_d, src1_dd, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, stream);
     } else {
-        const float * src1_dd = (const float *)src1_d;
+        const float * src1_dd = (const float *) src1_d;
 
         soft_max_f32_cuda(src0_d, src1_dd, dst_d, ne00, nrows_x, nrows_y, scale, max_bias, stream);
     }
+}
+
+void ggml_cuda_op_soft_max_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0]; // grad
+    const ggml_tensor * src1 = dst->src[1]; // forward pass output
+
+    const float * src0_d = (const float *) src0->data;
+    const float * src1_d = (const float *) src1->data;
+    float       * dst_d  = (float       *) dst->data;
+
+    cudaStream_t stream = ctx.stream();
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+
+    const int64_t ncols = src0->ne[0];
+    const int64_t nrows = ggml_nrows(src0);
+
+    float scale    = 1.0f;
+    float max_bias = 0.0f;
+
+    memcpy(&scale,    (const float *) dst->op_params + 0, sizeof(float));
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
+
+    GGML_ASSERT(max_bias == 0.0f);
+
+    soft_max_back_f32_cuda(src1_d, src0_d, dst_d, ncols, nrows, scale, stream);
 }
